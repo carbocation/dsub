@@ -1051,6 +1051,7 @@ class GoogleOperation(base.Task):
       if 'virtualMachine' in resources:
         vm = resources['virtualMachine']
         value['machine-type'] = vm['machineType']
+        value['min-cpu-platform'] = vm['minCPUPlatform']
         value['preemptible'] = vm['preemptible']
 
         value['boot-disk-size'] = vm['bootDiskSizeGb']

@@ -399,6 +399,8 @@ def _parse_arguments(prog, argv):
           Only one of --zones and --regions may be specified.""")
   google_v2.add_argument(
       '--machine-type', help='Provider-specific machine type')
+  google_v2.add_argument(
+      '--min-cpu-platform', help='Provider-specific minimum CPU platform')
 
   args = provider_base.parse_args(
       parser, {
