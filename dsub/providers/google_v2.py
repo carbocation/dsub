@@ -549,6 +549,7 @@ class GoogleV2JobProvider(base.JobProvider):
     ]
     network = google_v2_pipelines.build_network(None, None)
     machine_type = job_resources.machine_type or job_model.DEFAULT_MACHINE_TYPE
+    min_cpu_platform = job_resources.min_cpu_platform or job_model.DEFAULT_CPU_PLATFORM
     accelerators = None
     if job_resources.accelerator_type:
       accelerators = [
@@ -565,6 +566,7 @@ class GoogleV2JobProvider(base.JobProvider):
         google_v2_pipelines.build_machine(
             network=network,
             machine_type=machine_type,
+            min_cpu_platform=min_cpu_platform,
             preemptible=job_resources.preemptible,
             service_account=service_account,
             boot_disk_size_gb=job_resources.boot_disk_size,
