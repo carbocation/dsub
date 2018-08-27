@@ -432,6 +432,7 @@ def _get_job_resources(args):
       min_cores=args.min_cores,
       min_ram=args.min_ram,
       machine_type=args.machine_type,
+      min_cpu_platform=args.min_cpu_platform,
       disk_size=args.disk_size,
       boot_disk_size=args.boot_disk_size,
       preemptible=args.preemptible,
