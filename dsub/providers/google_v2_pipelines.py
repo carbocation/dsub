@@ -72,7 +72,7 @@ def build_machine(network=None,
   return {
       'network': network,
       'machineType': machine_type,
-      'minCPUPlatform': min_cpu_platform,
+      'cpuPlatform': min_cpu_platform,
       'preemptible': preemptible,
       'serviceAccount': service_account,
       'bootDiskSizeGb': boot_disk_size_gb,
