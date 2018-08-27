@@ -551,7 +551,7 @@ class GoogleV2JobProvider(base.JobProvider):
     machine_type = job_resources.machine_type or job_model.DEFAULT_MACHINE_TYPE
     # TODO: Determine whether you must specify a default or if None is OK here
     # min_cpu_platform = job_resources.min_cpu_platform or job_model.DEFAULT_MIN_CPU_PLATFORM
-    min_cpu_platform = job_resources.min_cpu_platform or None
+    min_cpu_platform = job_resources.min_cpu_platform
     accelerators = None
     if job_resources.accelerator_type:
       accelerators = [
