@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Utility routines for constructing a Google Batch API request."""
+import os
 from typing import List, Optional, Dict, MutableSequence
 
 # pylint: disable=g-import-not-at-top
@@ -218,6 +219,14 @@ def build_container(
   container.entrypoint = entrypoint
   container.commands = commands
   container.volumes = volumes
+
+  # Temporary workaround: only set container.options if the variable is defined
+  # in the environment and non-empty:
+  shm_size = os.environ.get("DSUB_BATCH_SHM_SIZE")
+  if shm_size:
+      # Support values like "12g", "8g", "2G", "1024m", etc.
+      container.options = f"--shm-size={shm_size}"
+
   return container
 
 
