@@ -1,3 +1,32 @@
+# carbocation/dsub fork
+
+This repository is a fork of
+[DataBiosphere/dsub](https://github.com/DataBiosphere/dsub). The
+`feature/batchfix` branch changes the `google-batch` provider so that one
+logical dsub job is submitted as one Google Batch Job containing an indexed
+task array. Multi-task jobs use `TaskGroup.task_count` and `BATCH_TASK_INDEX`
+to load task-specific parameters from a manifest in the logging bucket,
+supporting Google Batch's native task-array scale rather than creating one
+Google Batch Job per dsub task.
+
+Install this branch directly from GitHub, preferably inside a virtual
+environment:
+
+    python3 -m pip install --upgrade \
+        "git+https://github.com/carbocation/dsub.git@feature/batchfix"
+
+Then verify the installed command:
+
+    dsub --version
+
+It should report:
+
+    dsub version: 0.5.1+batchfix
+
+The upstream README is preserved verbatim below.
+
+---
+
 # dsub: simple batch jobs with Docker
 [![License](https://img.shields.io/badge/license-Apache%202.0-brightgreen.svg)](https://github.com/DataBiosphere/dsub/blob/main/LICENSE)
 
@@ -246,11 +275,6 @@ Details of Cloud Life Sciences versus Batch can be found in this
 few differences to note:
 
 - `google-batch` requires jobs to run in one region
-- `google-batch` submits one Cloud Batch job containing up to 100,000 tasks
-- Multi-task jobs stage an indexed task manifest in the logging bucket and use
-  the native Batch task index; the Batch service account needs read access to
-  that bucket
-- Cloud Batch can cancel a whole job, but not an individual task in that job
 
 The `--regions` and `--zones` flags for `dsub` specify where the tasks should
 run. The `google-cls-v2` allows you to specify a multi-region like `US`,
@@ -667,16 +691,13 @@ To delete a running job:
 
 If the job is a batch job, all running tasks will be deleted.
 
-To delete specific tasks with a provider that supports task cancellation:
+To delete specific tasks:
 
     ddel \
-        --provider local \
+        --provider google-batch \
+        --project my-cloud-project \
         --jobs job-id \
         --tasks task-id1 task-id2
-
-The `google-batch` provider cannot cancel a task independently because the
-Cloud Batch API exposes cancellation at the job level. Cancel the job to stop
-all of its running tasks.
 
 To delete all running jobs for the current user:
 
