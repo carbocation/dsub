@@ -21,6 +21,7 @@
 class types(object):
   """Dummy docstring."""
   Job = None
+  Task = None
   TaskGroup = None
   Volume = None
   TaskSpec = None
@@ -44,6 +45,19 @@ class types(object):
 
   class LogsPolicy(object):
     Destination = None
+
+
+class TaskStatus(object):
+  """Dummy TaskStatus type used only when the Batch dependency is absent."""
+
+  class State(object):
+    STATE_UNSPECIFIED = None
+    PENDING = None
+    ASSIGNED = None
+    RUNNING = None
+    FAILED = None
+    SUCCEEDED = None
+    UNEXECUTED = None
 
 
 # pylint: enable=invalid-name

@@ -246,6 +246,11 @@ Details of Cloud Life Sciences versus Batch can be found in this
 few differences to note:
 
 - `google-batch` requires jobs to run in one region
+- `google-batch` submits one Cloud Batch job containing up to 100,000 tasks
+- Multi-task jobs stage an indexed task manifest in the logging bucket and use
+  the native Batch task index; the Batch service account needs read access to
+  that bucket
+- Cloud Batch can cancel a whole job, but not an individual task in that job
 
 The `--regions` and `--zones` flags for `dsub` specify where the tasks should
 run. The `google-cls-v2` allows you to specify a multi-region like `US`,
@@ -662,13 +667,16 @@ To delete a running job:
 
 If the job is a batch job, all running tasks will be deleted.
 
-To delete specific tasks:
+To delete specific tasks with a provider that supports task cancellation:
 
     ddel \
-        --provider google-batch \
-        --project my-cloud-project \
+        --provider local \
         --jobs job-id \
         --tasks task-id1 task-id2
+
+The `google-batch` provider cannot cancel a task independently because the
+Cloud Batch API exposes cancellation at the job level. Cancel the job to stop
+all of its running tasks.
 
 To delete all running jobs for the current user:
 

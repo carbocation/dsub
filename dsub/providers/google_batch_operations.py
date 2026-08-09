@@ -37,11 +37,26 @@ def get_label(op: batch_v1.types.Job, name: str) -> str:
 def get_environment(
     op: batch_v1.types.Job, runnable_index: int
 ) -> Dict[str, str]:
-  # Currently Batch only supports task_groups of size 1
+  # Currently Batch only supports one TaskGroup per Job.
   task_group = op.task_groups[0]
   task_spec = task_group.task_spec
   runnables = task_spec.runnables
   return runnables[runnable_index].environment.variables
+
+
+def get_task_environment(
+    op: batch_v1.types.Job, task_index: int
+) -> Dict[str, str]:
+  """Return the per-task environment for a task in the Job's TaskGroup."""
+  task_environments = op.task_groups[0].task_environments
+  if task_index >= len(task_environments):
+    return {}
+  return task_environments[task_index].variables
+
+
+def get_task_spec_environment(op: batch_v1.types.Job) -> Dict[str, str]:
+  """Return environment variables shared by every task in a TaskGroup."""
+  return op.task_groups[0].task_spec.environment.variables
 
 
 def is_done(op: batch_v1.types.Job) -> bool:
@@ -98,6 +113,16 @@ def get_create_time(op: batch_v1.types.Job) -> Optional[str]:
 
 def get_status_events(op: batch_v1.types.Job):
   return op.status.status_events
+
+
+def get_job_state(op: batch_v1.types.Job):
+  """Return the state of a native Batch Job."""
+  return op.status.state
+
+
+def get_task_state(task: batch_v1.types.Task):
+  """Return the state of one native Batch Task."""
+  return task.status.state
 
 
 def get_preemptible(op: batch_v1.types.Job) -> bool:
@@ -166,12 +191,14 @@ def build_task_spec(
     runnables: List[batch_v1.types.task.Runnable],
     volumes: List[batch_v1.types.Volume],
     max_run_duration: str,
+    environment: batch_v1.types.Environment = None,
 ) -> batch_v1.types.TaskSpec:
   """Build a TaskSpec object for a Batch request.
 
   Args:
       runnables (List[Runnable]): List of Runnable objects
       volumes (List[Volume]): List of Volume objects
+      environment (Environment): Environment shared by every task and runnable
 
   Returns:
       A TaskSpec object.
@@ -180,6 +207,8 @@ def build_task_spec(
   task_spec.runnables = runnables
   task_spec.volumes = volumes
   task_spec.max_run_duration = max_run_duration
+  if environment is not None:
+    task_spec.environment = environment
   return task_spec
 
 

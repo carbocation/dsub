@@ -215,6 +215,22 @@ as a "data disk".
 
 #### Orchestration
 
+For the `google-batch` provider, one dsub job maps to one Cloud Batch Job. Its
+tasks are the tasks in the Job's single TaskGroup, and each task runs the same
+sequence of runnables. Multi-task jobs set the TaskGroup's `task_count` and
+stage an indexed task manifest in the logging bucket. Each native Batch task
+uses `BATCH_TASK_INDEX` to load the environment, inputs, outputs, and metadata
+for its corresponding dsub task. This supports Cloud Batch's native limit of
+100,000 tasks per TaskGroup without increasing the Batch job definition size
+for every task. The Batch service account must have read access to the logging
+bucket for multi-task jobs. Single-task jobs use the same `task_count` model but
+inline their environment in the TaskSpec to avoid manifest storage overhead.
+
+The provider interface exposes only the logical job and indexed task-array
+boundary. Manifest storage is specific to the Google Batch implementation, so
+future AWS Batch and Azure Batch providers can implement their own native
+task-index-to-parameters mechanism without changing dsub's job model.
+
 When the Pipelines
 [run()](https://cloud.google.com/life-sciences/docs/reference/rest/v2beta/projects.locations.pipelines/run)
 API is called, it creates an

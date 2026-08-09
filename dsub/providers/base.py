@@ -20,6 +20,14 @@ code and differ only in their input and output values.
 This model allows one to submit (dsub), monitor (dstat), and delete (ddel) a set
 of tasks as a single unit.
 
+Managed batch providers should preserve this boundary: a JobDescriptor maps to
+one provider job and its ordered TaskDescriptors map to that job's indexed
+native task/array entries. How a provider resolves each native task index to
+its dsub parameters is provider-specific. Provider limits or immutable-job
+retry behavior may require additional provider jobs, but should not make one
+provider job per task by default. This keeps the contract suitable for Google
+Batch, AWS Batch, Azure Batch, and other job-array services.
+
 To submit a job with a list of tasks, use the dsub "--tasks" parameter. dsub
 will assign task ids to each task.
 
