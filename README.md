@@ -21,7 +21,7 @@ Then verify the installed command:
 
 It should report:
 
-    dsub version: 0.5.1+batchfix.1
+    dsub version: 0.5.1+batchfix.2
 
 To install changes from a local checkout into the Python environment that
 provides your `dsub` command, run:
@@ -42,6 +42,11 @@ setup, task-manifest loading, transfers, and logging; `--image` continues
 to select the container for your analysis. An unset or empty override
 uses the default. Mirror a pinned image into a registry you control
 if you need to retain it beyond Google's retention window.
+
+When a new Job or its Tasks are not yet visible in Batch listings, the
+provider checks exact Job IDs directly and uses the parent Job status for
+missing Task records. This keeps `--wait` active during startup; actual
+Task records retain their individual outcomes as soon as they are available.
 
 The upstream README is preserved verbatim below.
 

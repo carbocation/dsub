@@ -27,6 +27,7 @@ import sys
 import textwrap
 from typing import Dict, List, NamedTuple, Set
 
+from google.api_core import exceptions as google_exceptions
 import googleapiclient.http
 
 from ..lib import dsub_util
@@ -326,10 +327,13 @@ class GoogleBatchOperation(base.Task):
       operation_data: batch_v1.types.Job,
       task_data: batch_v1.types.Task = None,
       task_environment: Dict[str, str] = None,
+      task_index: int = 0,
   ):
     self._op = operation_data
     self._task = task_data
-    self._task_index = self._get_task_index(task_data)
+    self._task_index = (
+        self._get_task_index(task_data) if task_data is not None else task_index
+    )
     self._manifest_task_environment = task_environment
     self._job_descriptor = self._try_op_to_job_descriptor()
 
@@ -586,6 +590,10 @@ class GoogleBatchOperation(base.Task):
 
     if status_events:
       detail = status_events[-1].description
+    if self._task is None:
+      detail = (
+          'Batch task {} is not yet visible; using parent Job status: {}. {}'
+      ).format(self._task_index, msg, detail or '').strip()
     return msg, action, detail
 
 
@@ -1540,19 +1548,44 @@ class GoogleBatchJobProvider(google_utils.GoogleJobProviderBase):
         filter=ops_filter,
     )
 
-    # Make the request
-    response = client.list_jobs(request=request)
+    jobs = list(client.list_jobs(request=request))
+    # An exact Job lookup can succeed before the list index exposes a newly
+    # submitted Job. Retain label-based listing for legacy IDs and retries.
+    found_job_ids = {job.labels.get('job-id') for job in jobs}
+    for job_id in set(job_ids or []) - found_job_ids:
+      if job_id == '*':
+        continue
+      try:
+        job = client.get_job(request=batch_v1.GetJobRequest(
+            name=f'{request.parent}/jobs/{job_id}'
+        ))
+      except google_exceptions.NotFound:
+        continue
+      jobs.append(job)
+
     operations = []
-    for job in response:
+    for job in jobs:
       manifest_environments = self._download_task_manifest(job)
       task_request = batch_v1.ListTasksRequest(
           parent=f'{job.name}/taskGroups/{_TASK_GROUP_NAME}',
           page_size=page_size,
       )
-      for batch_task in client.list_tasks(request=task_request):
+      try:
+        batch_tasks = {
+            GoogleBatchOperation._get_task_index(task): task
+            for task in client.list_tasks(request=task_request)
+        }
+      except google_exceptions.NotFound:
+        # The parent Job is visible, but its TaskGroup may still be pending.
+        batch_tasks = {}
+      task_count = job.task_groups[0].task_count or 1
+      # A missing task must not disappear from dsub's wait loop. Until Batch
+      # exposes its Task record, use the Job's status and the submitted task
+      # metadata. Always prefer actual Task records, including mixed outcomes.
+      for task_index in sorted(set(range(task_count)) | set(batch_tasks)):
+        batch_task = batch_tasks.get(task_index)
         task_environment = None
         if manifest_environments is not None:
-          task_index = GoogleBatchOperation._get_task_index(batch_task)
           if task_index >= len(manifest_environments):
             raise ValueError(
                 'Google Batch task index {} is missing from manifest {}'.format(
@@ -1563,7 +1596,9 @@ class GoogleBatchJobProvider(google_utils.GoogleJobProviderBase):
                 )
             )
           task_environment = manifest_environments[task_index]
-        task = GoogleBatchOperation(job, batch_task, task_environment)
+        task = GoogleBatchOperation(
+            job, batch_task, task_environment, task_index=task_index
+        )
         if self._matches_task_filters(
             task,
             statuses,

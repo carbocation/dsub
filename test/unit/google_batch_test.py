@@ -28,6 +28,7 @@ from unittest import mock
 from google.cloud import batch_v1
 import pytz
 
+from dsub.commands import dsub as dsub_command
 from dsub.lib import job_model
 from dsub.lib import param_util
 from dsub.providers import google_batch
@@ -439,6 +440,126 @@ class GoogleBatchProviderTest(unittest.TestCase):
     self.assertEqual(
         list_tasks_request.parent, f'{job.name}/taskGroups/group0'
     )
+
+  def _lookup_fixture(self, task_count=1):
+    request, manifest = self.provider._prepare_batch_request(
+        self._job_descriptor(task_count=task_count)
+    )
+    job = request.job
+    job.name = 'projects/test-project/locations/us-central1/jobs/job-id'
+    job.status.state = batch_v1.JobStatus.State.QUEUED
+    job.create_time = datetime.datetime(2026, 1, 2, tzinfo=pytz.utc)
+    environments = (
+        self._manifest_environments(manifest) if manifest else None
+    )
+    return job, environments
+
+  def test_wait_survives_job_and_task_listing_delays(self):
+    job, _ = self._lookup_fixture()
+    successful_task = batch_v1.Task(
+        name=f'{job.name}/taskGroups/group0/tasks/0',
+        status=batch_v1.TaskStatus(state=batch_v1.TaskStatus.State.SUCCEEDED),
+    )
+    client = mock.Mock()
+    client.list_jobs.return_value = []
+    client.get_job.return_value = job
+    client.list_tasks.side_effect = [[], [successful_task], [successful_task]]
+    with mock.patch.object(
+        google_batch.batch_v1, 'BatchServiceClient', return_value=client
+    ), mock.patch.object(dsub_command, 'SLEEP_FUNCTION') as sleep:
+      errors = dsub_command._wait_after(
+          self.provider, {'job-id'}, 10, False, False
+      )
+    self.assertEqual(errors, [])
+    sleep.assert_called_once_with(10)
+    self.assertEqual(client.get_job.call_args.kwargs['request'].name, job.name)
+
+  def test_missing_task_group_keeps_known_job_running(self):
+    job, _ = self._lookup_fixture()
+    client = mock.Mock()
+    client.list_jobs.return_value = [job]
+    client.list_tasks.side_effect = google_batch.google_exceptions.NotFound(
+        'TaskGroup has not appeared'
+    )
+    with mock.patch.object(
+        google_batch.batch_v1, 'BatchServiceClient', return_value=client
+    ):
+      tasks = list(self.provider.lookup_job_tasks({'RUNNING'}))
+    self.assertEqual(len(tasks), 1)
+    self.assertEqual(tasks[0].get_field('job-id'), 'job-id')
+    self.assertIn('not yet visible', tasks[0].get_field('status-detail'))
+
+  def test_partial_task_listing_preserves_missing_task_metadata_and_filters(self):
+    job, environments = self._lookup_fixture(task_count=3)
+    job.status.state = batch_v1.JobStatus.State.RUNNING
+    completed_task = batch_v1.Task(
+        name=f'{job.name}/taskGroups/group0/tasks/0',
+        status=batch_v1.TaskStatus(state=batch_v1.TaskStatus.State.SUCCEEDED),
+    )
+    client = mock.Mock()
+    client.list_jobs.return_value = [job]
+    client.list_tasks.return_value = [completed_task]
+    with mock.patch.object(
+        google_batch.batch_v1, 'BatchServiceClient', return_value=client
+    ), mock.patch.object(
+        self.provider, '_download_task_manifest', return_value=environments
+    ):
+      tasks = list(self.provider.lookup_job_tasks({'*'}))
+      filtered = list(self.provider.lookup_job_tasks(
+          {'RUNNING'}, task_ids={'3'},
+          labels=[job_model.LabelParam('task-label', 'task-3')],
+      ))
+    self.assertEqual(
+        {task.get_field('task-id'): task.get_field('task-status') for task in tasks},
+        {'1': 'SUCCESS', '2': 'RUNNING', '3': 'RUNNING'},
+    )
+    self.assertEqual(len(filtered), 1)
+    self.assertEqual(filtered[0].get_field('envs')['SAMPLE_ID'], 'sample-3')
+
+  def test_missing_terminal_tasks_use_parent_status(self):
+    for state, expected in [
+        (batch_v1.JobStatus.State.SUCCEEDED, 'SUCCESS'),
+        (batch_v1.JobStatus.State.FAILED, 'FAILURE'),
+        (batch_v1.JobStatus.State.CANCELLED, 'CANCELED'),
+    ]:
+      with self.subTest(state=state):
+        job, _ = self._lookup_fixture()
+        job.status.state = state
+        client = mock.Mock()
+        client.list_jobs.return_value = [job]
+        client.list_tasks.return_value = []
+        with mock.patch.object(
+            google_batch.batch_v1, 'BatchServiceClient', return_value=client
+        ):
+          tasks = list(self.provider.lookup_job_tasks({'*'}))
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0].get_field('task-status'), expected)
+
+  def test_unknown_job_still_returns_not_found(self):
+    client = mock.Mock()
+    client.list_jobs.return_value = []
+    client.get_job.side_effect = google_batch.google_exceptions.NotFound('absent')
+    with mock.patch.object(
+        google_batch.batch_v1, 'BatchServiceClient', return_value=client
+    ):
+      self.assertEqual(list(self.provider.lookup_job_tasks(
+          {'*'}, job_ids={'missing-job'}
+      )), [])
+    client.list_tasks.assert_not_called()
+
+  def test_exact_job_fallback_still_honors_filters(self):
+    job, _ = self._lookup_fixture()
+    client = mock.Mock()
+    client.list_jobs.return_value = []
+    client.get_job.return_value = job
+    client.list_tasks.return_value = []
+    with mock.patch.object(
+        google_batch.batch_v1, 'BatchServiceClient', return_value=client
+    ):
+      tasks = list(self.provider.lookup_job_tasks(
+          {'*'}, job_ids={'job-id'}, user_ids={'different-user'}
+      ))
+    self.assertEqual(tasks, [])
 
   def test_large_task_array_uses_indexed_manifest(self):
     descriptor = self._job_descriptor(task_count=201)
