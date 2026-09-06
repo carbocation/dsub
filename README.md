@@ -21,7 +21,27 @@ Then verify the installed command:
 
 It should report:
 
-    dsub version: 0.5.1+batchfix
+    dsub version: 0.5.1+batchfix.1
+
+To install changes from a local checkout into the Python environment that
+provides your `dsub` command, run:
+
+    python3 -m pip install --upgrade /path/to/dsub
+
+The Google helper containers use
+`gcr.io/google.com/cloudsdktool/cloud-sdk:slim` and Python 3. Google
+[removes numbered Cloud SDK images after one year](https://github.com/GoogleCloudPlatform/cloud-sdk-docker#package-retention-policy);
+the former `294.0.0-slim` image no longer exists. The rolling default
+avoids that expiry but follows future image updates. To use a known
+compatible image, set `DSUB_CLOUD_SDK_IMAGE` before submitting jobs:
+
+    export DSUB_CLOUD_SDK_IMAGE=YOUR_REGISTRY/cloud-sdk:YOUR_TAG
+
+The override must provide Bash, `python3`, and `gsutil`. It applies to
+setup, task-manifest loading, transfers, and logging; `--image` continues
+to select the container for your analysis. An unset or empty override
+uses the default. Mirror a pinned image into a registry you control
+if you need to retain it beyond Google's retention window.
 
 The upstream README is preserved verbatim below.
 

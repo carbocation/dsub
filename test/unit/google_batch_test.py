@@ -14,8 +14,14 @@
 """Unit tests for the Google Batch provider's Job-to-TaskGroup mapping."""
 
 import datetime
+import importlib
 import json
+import os
+from pathlib import Path
+import shutil
 import subprocess
+import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -25,6 +31,7 @@ import pytz
 from dsub.lib import job_model
 from dsub.lib import param_util
 from dsub.providers import google_batch
+from dsub.providers import google_utils
 
 
 class GoogleBatchProviderTest(unittest.TestCase):
@@ -141,6 +148,73 @@ class GoogleBatchProviderTest(unittest.TestCase):
         first_environment['_DSUB_BATCH_LOCALIZATION_INPUT_COUNT'], '0'
     )
     self.assertNotIn('task-label', request.job.labels)
+
+  def test_helper_image_override_preserves_single_and_array_user_images(self):
+    try:
+      for override in ['', 'example.org/custom/cloud-sdk:tested']:
+        with self.subTest(override=override), mock.patch.dict(
+            os.environ, {'DSUB_CLOUD_SDK_IMAGE': override}
+        ):
+          importlib.reload(google_utils)
+          for task_count in [1, 3]:
+            request, _ = self.provider._prepare_batch_request(
+                self._job_descriptor(task_count=task_count)
+            )
+            task_group = request.job.task_groups[0]
+            self.assertEqual(task_group.task_count, task_count)
+            user_count = 0
+            helper_count = 0
+            for runnable in task_group.task_spec.runnables:
+              if runnable.container.entrypoint == '/usr/bin/env':
+                self.assertEqual(runnable.container.image_uri, 'ubuntu:22.04')
+                user_count += 1
+              else:
+                self.assertEqual(
+                    runnable.container.image_uri,
+                    override or 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim',
+                )
+                helper_count += 1
+            self.assertEqual(user_count, 1)
+            self.assertEqual(helper_count, 5 if task_count == 1 else 6)
+    finally:
+      importlib.reload(google_utils)
+
+  def test_prepare_and_logging_bootstrap_work_with_only_python3(self):
+    descriptor = self._job_descriptor(task_count=1)
+    request, _ = self.provider._prepare_batch_request(descriptor)
+    task_spec = request.job.task_groups[0].task_spec
+    with tempfile.TemporaryDirectory() as directory:
+      root = Path(directory)
+      tools_dir = root / 'bin'
+      tools_dir.mkdir()
+      (tools_dir / 'python3').symlink_to(sys.executable)
+      for command in ['mkdir', 'chmod', 'date']:
+        (tools_dir / command).symlink_to(shutil.which(command))
+      environment = dict(os.environ)
+      environment.update(task_spec.environment.variables)
+      environment['PATH'] = str(tools_dir)
+      self.assertIsNone(shutil.which('python', path=environment['PATH']))
+      data_dir = root / 'data'
+      logging_dir = data_dir / '.logging'
+      logging_dir.mkdir(parents=True)
+      # Stop after decoding the logging script, before cloud uploads begin.
+      (logging_dir / '.stop_logging').touch()
+      for index in [1, 0]:
+        command = task_spec.runnables[index].container.commands[1]
+        command = command.replace('/mnt/data', str(data_dir))
+        result = subprocess.run(
+            ['/bin/bash', '-c', command], env=environment,
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+      self.assertEqual(
+          (data_dir / 'script' / 'script.sh').read_text(),
+          descriptor.job_metadata['script'].value,
+      )
+      self.assertEqual(
+          (data_dir / '.log_filter_script.py').read_text(),
+          google_batch._LOG_FILTER_PYTHON,
+      )
 
   def test_single_task_uses_task_count_and_inline_task_spec_environment(self):
     descriptor = self._job_descriptor(task_count=1)
