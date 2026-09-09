@@ -51,6 +51,7 @@ _PROVIDER_NAME = 'google-batch'
 # Index of the prepare action in the runnable list
 _PREPARE_INDEX = 1
 _TASK_GROUP_NAME = 'group0'
+_DEFAULT_LIST_PAGE_SIZE = 500
 _MAX_TASKS_PER_JOB = 100000
 _MAX_INLINE_JOB_DEFINITION_BYTES = 900000
 _TASK_ENV_PREFIX = '_DSUB_BATCH_{action}_'
@@ -1528,6 +1529,10 @@ class GoogleBatchJobProvider(google_utils.GoogleJobProviderBase):
       page_size=0,
   ):
     client = batch_v1.BatchServiceClient()
+    # Batch can bind its default size (500) into a continuation token while
+    # the Python pager retains the request's zero value. Send an explicit
+    # size on the first request so every page uses the same value.
+    effective_page_size = page_size or _DEFAULT_LIST_PAGE_SIZE
     # Job-level filters can be sent to list_jobs. Status and task metadata
     # filters must be evaluated after list_tasks: a failed multi-task Job can
     # still contain successful tasks, and task labels are not Job labels.
@@ -1546,6 +1551,7 @@ class GoogleBatchJobProvider(google_utils.GoogleJobProviderBase):
     request = batch_v1.ListJobsRequest(
         parent=f'projects/{self._project}/locations/{self._location}',
         filter=ops_filter,
+        page_size=effective_page_size,
     )
 
     jobs = list(client.list_jobs(request=request))
@@ -1568,7 +1574,7 @@ class GoogleBatchJobProvider(google_utils.GoogleJobProviderBase):
       manifest_environments = self._download_task_manifest(job)
       task_request = batch_v1.ListTasksRequest(
           parent=f'{job.name}/taskGroups/{_TASK_GROUP_NAME}',
-          page_size=page_size,
+          page_size=effective_page_size,
       )
       try:
         batch_tasks = {

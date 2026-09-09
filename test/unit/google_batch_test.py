@@ -26,6 +26,7 @@ import unittest
 from unittest import mock
 
 from google.cloud import batch_v1
+from google.cloud.batch_v1.services.batch_service import pagers
 import pytz
 
 from dsub.commands import dsub as dsub_command
@@ -453,6 +454,111 @@ class GoogleBatchProviderTest(unittest.TestCase):
         self._manifest_environments(manifest) if manifest else None
     )
     return job, environments
+
+  def test_task_pagination_keeps_explicit_page_size(self):
+    job, environments = self._lookup_fixture(task_count=501)
+    records = [
+        batch_v1.Task(
+            name=f'{job.name}/taskGroups/group0/tasks/{index}',
+            status=batch_v1.TaskStatus(state=batch_v1.TaskStatus.State.SUCCEEDED),
+        )
+        for index in range(501)
+    ]
+    for requested_size in [0, 7]:
+      with self.subTest(page_size=requested_size):
+        requests = []
+        effective_size = requested_size or 500
+
+        def fetch_page(request, **unused_kwargs):
+          requests.append(batch_v1.ListTasksRequest(request))
+          if request.page_token and request.page_size != effective_size:
+            raise google_batch.google_exceptions.InvalidArgument(
+                'mismatching token page size'
+            )
+          start = int(request.page_token or 0)
+          end = start + (request.page_size or 500)
+          return batch_v1.ListTasksResponse(
+              tasks=records[start:end],
+              next_page_token=str(end) if end < len(records) else '',
+          )
+
+        def list_tasks(request):
+          return pagers.ListTasksPager(
+              method=fetch_page, request=request, response=fetch_page(request)
+          )
+
+        client = mock.Mock()
+        client.list_jobs.return_value = [job]
+        client.list_tasks.side_effect = list_tasks
+        with mock.patch.object(
+            google_batch.batch_v1, 'BatchServiceClient', return_value=client
+        ), mock.patch.object(
+            self.provider, '_download_task_manifest', return_value=environments
+        ):
+          tasks = list(self.provider.lookup_job_tasks(
+              {'*'}, page_size=requested_size
+          ))
+        self.assertEqual(len(tasks), 501)
+        self.assertEqual(
+            {task.get_field('task-id') for task in tasks},
+            {str(index) for index in range(1, 502)},
+        )
+        self.assertTrue(all(task.get_field('task-status') == 'SUCCESS'
+                            for task in tasks))
+        self.assertGreater(len(requests), 1)
+        self.assertEqual({request.page_size for request in requests},
+                         {effective_size})
+
+  def test_job_pagination_keeps_explicit_page_size(self):
+    job, _ = self._lookup_fixture()
+    records = []
+    for index in range(501):
+      record = batch_v1.Job(job)
+      record.name = f'{job.name}-{index}'
+      record.labels['job-id'] = f'job-id-{index}'
+      records.append(record)
+    for requested_size in [0, 7]:
+      with self.subTest(page_size=requested_size):
+        requests = []
+        effective_size = requested_size or 500
+
+        def fetch_page(request, **unused_kwargs):
+          requests.append(batch_v1.ListJobsRequest(request))
+          if request.page_token and request.page_size != effective_size:
+            raise google_batch.google_exceptions.InvalidArgument(
+                'mismatching token page size'
+            )
+          start = int(request.page_token or 0)
+          end = start + (request.page_size or 500)
+          return batch_v1.ListJobsResponse(
+              jobs=records[start:end],
+              next_page_token=str(end) if end < len(records) else '',
+          )
+
+        def list_jobs(request):
+          return pagers.ListJobsPager(
+              method=fetch_page, request=request, response=fetch_page(request)
+          )
+
+        client = mock.Mock()
+        client.list_jobs.side_effect = list_jobs
+        client.list_tasks.return_value = []
+        with mock.patch.object(
+            google_batch.batch_v1, 'BatchServiceClient', return_value=client
+        ), mock.patch.object(
+            self.provider, '_download_task_manifest', return_value=None
+        ):
+          tasks = list(self.provider.lookup_job_tasks(
+              {'*'}, page_size=requested_size
+          ))
+        self.assertEqual(len(tasks), 501)
+        self.assertEqual(
+            {task.get_field('internal-id') for task in tasks},
+            {record.name for record in records},
+        )
+        self.assertGreater(len(requests), 1)
+        self.assertEqual({request.page_size for request in requests},
+                         {effective_size})
 
   def test_wait_survives_job_and_task_listing_delays(self):
     job, _ = self._lookup_fixture()

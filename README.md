@@ -21,7 +21,7 @@ Then verify the installed command:
 
 It should report:
 
-    dsub version: 0.5.1+batchfix.2
+    dsub version: 0.5.1+batchfix.3
 
 To install changes from a local checkout into the Python environment that
 provides your `dsub` command, run:
@@ -47,6 +47,11 @@ When a new Job or its Tasks are not yet visible in Batch listings, the
 provider checks exact Job IDs directly and uses the parent Job status for
 missing Task records. This keeps `--wait` active during startup; actual
 Task records retain their individual outcomes as soon as they are available.
+
+Job and task listings use an explicit page size (500 by default). This
+keeps continuation requests consistent with Batch's page tokens and avoids
+the `request page size (0) != token page size (500)` error when monitoring
+large task arrays. An explicitly requested nonzero page size is preserved.
 
 The upstream README is preserved verbatim below.
 
