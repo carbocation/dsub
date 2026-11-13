@@ -16,9 +16,15 @@
 
 import copy
 import datetime
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
 import unittest
 from dsub.lib import dsub_util
 from dsub.lib import job_model
+from dsub.lib import param_util
 from dsub.providers import local
 import pytz
 
@@ -98,6 +104,142 @@ class TestSortTasks(unittest.TestCase):
     self.assertEqual(tasks[3].get_field('task-id'), 2)
     self.assertEqual(tasks[4].get_field('create-time'), CREATE_TIME_1)
     self.assertEqual(tasks[4].get_field('task-id'), 1)
+
+
+@unittest.skipUnless(shutil.which('rsync'), 'rsync is required for local copies')
+class TestLocalFileCopies(unittest.TestCase):
+  """Execute local staging commands without a cloud CLI or Docker."""
+
+  def setUp(self):
+    directory = tempfile.TemporaryDirectory(prefix='dsub local copies ')
+    self.addCleanup(directory.cleanup)
+    self.root = Path(directory.name)
+    self.task_dir = self.root / 'task directory'
+    self.provider = local.LocalJobProvider(resources=None)
+    bin_dir = self.root / 'bin'
+    bin_dir.mkdir()
+    for command in ['rsync', 'mkdir']:
+      (bin_dir / command).symlink_to(shutil.which(command))
+    for command in ['gcloud', 'gsutil']:
+      executable = bin_dir / command
+      executable.write_text(
+          '#!/bin/bash\necho "Cloud CLI used for a local copy" >&2\nexit 99\n')
+      executable.chmod(0o755)
+    self.environment = dict(os.environ, PATH=str(bin_dir))
+
+  def _run(self, command):
+    result = subprocess.run(
+        ['/bin/bash', '-e', '-c', command], env=self.environment,
+        capture_output=True, text=True, timeout=10)
+    self.assertEqual(result.returncode, 0, result.stderr)
+
+  def _write(self, path, contents):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(contents)
+
+  def _staged_path(self, param):
+    return self.task_dir / 'data' / param.docker_path
+
+  def test_localize_single_file_with_spaces(self):
+    source = self.root / 'source directory' / 'input file.txt'
+    self._write(source, 'single input\n')
+    param = param_util.InputFileParamUtil('input').make_param(
+        'INPUT', str(source), recursive=False)
+
+    self._run(self.provider._localize_inputs_command(
+        str(self.task_dir), [param], user_project='billing-project'))
+
+    self.assertEqual(self._staged_path(param).read_text(), 'single input\n')
+
+  def test_localize_follows_file_symlink(self):
+    target = self.root / 'link targets' / 'input target.txt'
+    self._write(target, 'linked input\n')
+    source = self.root / 'input link.txt'
+    source.symlink_to(target)
+    param = param_util.InputFileParamUtil('input').make_param(
+        'INPUT', str(source), recursive=False)
+
+    self._run(self.provider._localize_inputs_command(
+        str(self.task_dir), [param], user_project=None))
+
+    staged = self._staged_path(param)
+    self.assertTrue(staged.is_file())
+    self.assertFalse(staged.is_symlink())
+    self.assertEqual(staged.read_text(), 'linked input\n')
+
+  def test_localize_wildcards_copy_files_and_skip_directories(self):
+    for count in [1, 2]:
+      with self.subTest(matches=count):
+        source_dir = self.root / ('source files %s' % count)
+        expected = {}
+        for index in range(count):
+          name = 'input file %s.txt' % index
+          expected[name] = 'input %s\n' % index
+          self._write(source_dir / name, expected[name])
+        self._write(source_dir / 'input directory.txt' / 'child.txt', 'skip\n')
+        (source_dir / 'input linked directory.txt').symlink_to(
+            source_dir / 'input directory.txt', target_is_directory=True)
+        param = param_util.InputFileParamUtil('input').make_param(
+            'INPUT', str(source_dir / 'input *.txt'), recursive=False)
+
+        self._run(self.provider._localize_inputs_command(
+            str(self.task_dir), [param], user_project=None))
+
+        destination = self._staged_path(param).parent
+        self.assertEqual(
+            {path.name: path.read_text() for path in destination.iterdir()},
+            expected)
+
+  def test_delocalize_single_file_with_spaces(self):
+    destination = self.root / 'output directory' / 'output file.txt'
+    param = param_util.OutputFileParamUtil('output').make_param(
+        'OUTPUT', str(destination), recursive=False)
+    self._write(self._staged_path(param), 'single output\n')
+
+    self._run(self.provider._delocalize_outputs_commands(
+        str(self.task_dir), [param], user_project='billing-project'))
+
+    self.assertEqual(destination.read_text(), 'single output\n')
+
+  def test_delocalize_follows_file_symlink(self):
+    target = self.root / 'link targets' / 'output target.txt'
+    self._write(target, 'linked output\n')
+    destination = self.root / 'output directory' / 'output link.txt'
+    param = param_util.OutputFileParamUtil('output').make_param(
+        'OUTPUT', str(destination), recursive=False)
+    staged = self._staged_path(param)
+    staged.parent.mkdir(parents=True)
+    staged.symlink_to(target)
+
+    self._run(self.provider._delocalize_outputs_commands(
+        str(self.task_dir), [param], user_project=None))
+
+    self.assertTrue(destination.is_file())
+    self.assertFalse(destination.is_symlink())
+    self.assertEqual(destination.read_text(), 'linked output\n')
+
+  def test_delocalize_wildcards_copy_files_and_skip_directories(self):
+    for count in [1, 2]:
+      with self.subTest(matches=count):
+        destination = self.root / ('output files %s' % count)
+        param = param_util.OutputFileParamUtil('output').make_param(
+            'OUTPUT', str(destination / 'output *.txt'), recursive=False)
+        source_dir = self._staged_path(param).parent
+        expected = {}
+        for index in range(count):
+          name = 'output file %s.txt' % index
+          expected[name] = 'output %s\n' % index
+          self._write(source_dir / name, expected[name])
+        self._write(source_dir / 'output directory.txt' / 'child.txt', 'skip\n')
+        (source_dir / 'output linked directory.txt').symlink_to(
+            source_dir / 'output directory.txt', target_is_directory=True)
+
+        self._run(self.provider._delocalize_outputs_commands(
+            str(self.task_dir), [param], user_project=None))
+
+        self.assertEqual(
+            {path.name: path.read_text() for path in destination.iterdir()},
+            expected)
 
 
 if __name__ == '__main__':

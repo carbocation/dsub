@@ -54,6 +54,7 @@ submitted will run concurrently.
 import collections
 import datetime
 import os
+import shlex
 import signal
 import string
 import subprocess
@@ -712,9 +713,10 @@ class LocalJobProvider(base.JobProvider):
     elif logging_path.file_provider == job_model.P_GCS:
       mkdir_cmd = ''
       if user_project:
-        cp_cmd = 'gsutil -u {} -mq cp'.format(user_project)
+        cp_cmd = ('gcloud storage cp --no-user-output-enabled '
+                  '--billing-project={}'.format(user_project))
       else:
-        cp_cmd = 'gsutil -mq cp'
+        cp_cmd = 'gcloud storage cp --no-user-output-enabled'
     else:
       assert False
 
@@ -772,8 +774,16 @@ class LocalJobProvider(base.JobProvider):
     ]
     return '\n'.join(provider_commands)
 
+  @staticmethod
+  def _local_copy_command(source, destination):
+    """Copy local files, expanding filename wildcards without recursing."""
+    # Quote literal path segments while letting the shell expand only '*'.
+    # Follow file symlinks and skip matching subdirectories, as gsutil cp did.
+    source_pattern = '*'.join(shlex.quote(part) for part in source.split('*'))
+    return 'rsync -L -- {} {}'.format(source_pattern, shlex.quote(destination))
+
   def _get_input_target_path(self, local_file_path):
-    """Returns a directory or file path to be the target for "gsutil cp".
+    """Returns a directory or file path to use as the copy target.
 
     If the filename contains a wildcard, then the target path must
     be a directory in order to ensure consistency whether the source pattern
@@ -784,7 +794,7 @@ class LocalJobProvider(base.JobProvider):
       local_file_path: A full path terminating in a file or a file wildcard.
 
     Returns:
-      The path to use as the "gsutil cp" target.
+      The path to use as the copy target.
     """
 
     path, filename = os.path.split(local_file_path)
@@ -806,21 +816,19 @@ class LocalJobProvider(base.JobProvider):
 
       commands.append('mkdir -p "%s"' % os.path.dirname(local_file_path))
 
-      if i.file_provider in [job_model.P_LOCAL, job_model.P_GCS]:
-        # The semantics that we expect here are implemented consistently in
-        # "gsutil cp", and are a bit different than "cp" when it comes to
-        # wildcard handling, so use it for both local and GCS:
-        #
-        # - `cp path/* dest/` will error if "path" has subdirectories.
-        # - `cp "path/*" "dest/"` will fail (it expects wildcard expansion
-        #   to come from shell).
+      if i.file_provider == job_model.P_GCS:
         if user_project:
-          command = 'gsutil -u %s -mq cp "%s" "%s"' % (
-              user_project, source_file_path, dest_file_path)
+          command = ('gcloud storage cp --no-user-output-enabled '
+                     '--billing-project=%s "%s" "%s"' % (
+                         user_project, source_file_path, dest_file_path))
         else:
-          command = 'gsutil -mq cp "%s" "%s"' % (source_file_path,
-                                                 dest_file_path)
+          command = 'gcloud storage cp --no-user-output-enabled "%s" "%s"' % (
+              source_file_path, dest_file_path)
         commands.append(command)
+      elif i.file_provider == job_model.P_LOCAL:
+        # "gcloud storage cp" does not support local-to-local copies.
+        commands.append(self._local_copy_command(source_file_path,
+                                                 dest_file_path))
 
     return '\n'.join(commands)
 
@@ -851,7 +859,7 @@ class LocalJobProvider(base.JobProvider):
     return '\n'.join(cmd_lines)
 
   def _delocalize_outputs_commands(self, task_dir, outputs, user_project):
-    """Copy outputs from local disk to GCS."""
+    """Copy outputs from the task directory to local disk or GCS."""
     commands = []
     for o in outputs:
       if o.recursive or not o.value:
@@ -865,14 +873,17 @@ class LocalJobProvider(base.JobProvider):
       if o.file_provider == job_model.P_LOCAL:
         commands.append('mkdir -p "%s"' % dest_path)
 
-      # Use gsutil even for local files (explained in _localize_inputs_command).
-      if o.file_provider in [job_model.P_LOCAL, job_model.P_GCS]:
+      if o.file_provider == job_model.P_GCS:
         if user_project:
-          command = 'gsutil -u %s -mq cp "%s" "%s"' % (user_project, local_path,
-                                                       dest_path)
+          command = ('gcloud storage cp --no-user-output-enabled '
+                     '--billing-project=%s "%s" "%s"' % (
+                         user_project, local_path, dest_path))
         else:
-          command = 'gsutil -mq cp "%s" "%s"' % (local_path, dest_path)
+          command = 'gcloud storage cp --no-user-output-enabled "%s" "%s"' % (
+              local_path, dest_path)
         commands.append(command)
+      elif o.file_provider == job_model.P_LOCAL:
+        commands.append(self._local_copy_command(local_path, dest_path))
 
     return '\n'.join(commands)
 

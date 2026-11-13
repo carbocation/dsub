@@ -797,5 +797,168 @@ class GoogleBatchProviderTest(unittest.TestCase):
       )
 
 
+class StorageCommandTest(unittest.TestCase):
+  """The helper scripts copy with "gcloud storage" and fail loudly."""
+
+  _FAKE_GCLOUD = r"""
+import json
+import os
+import sys
+
+args = sys.argv[1:]
+with open(os.environ['FAKE_GCLOUD_CALLS'], 'a', encoding='utf-8') as calls:
+  calls.write(json.dumps(args) + '\n')
+if os.environ.get('FAKE_GCLOUD_FAIL'):
+  sys.stderr.write('simulated gcloud failure\n')
+  sys.exit(1)
+if args[:2] == ['storage', 'cat']:
+  byte_range = [a for a in args if a.startswith('--range=')][0]
+  start, end = [int(x) for x in byte_range[len('--range='):].split('-')]
+  path = os.path.join(os.environ['FAKE_GCS_ROOT'], args[-1][len('gs://'):])
+  with open(path, 'rb') as source:
+    sys.stdout.buffer.write(source.read()[start:end + 1])
+elif args[:2] == ['storage', 'cp']:
+  # Like the real command, refuse a missing local destination directory.
+  dst = args[-1]
+  if (dst.endswith('/') and not dst.startswith('gs://')
+      and not os.path.isdir(dst)):
+    sys.stderr.write('Destination URL must name an existing directory\n')
+    sys.exit(1)
+elif args[:2] != ['storage', 'rsync']:
+  sys.exit(2)
+"""
+
+  def setUp(self):
+    storage_patch = mock.patch.object(
+        google_batch.dsub_util, 'get_storage_service'
+    )
+    self.addCleanup(storage_patch.stop)
+    storage_patch.start()
+    self.provider = google_batch.GoogleBatchJobProvider(
+        dry_run=False, project='test-project', location='us-central1'
+    )
+    directory = tempfile.TemporaryDirectory()
+    self.addCleanup(directory.cleanup)
+    self.root = Path(directory.name)
+    bin_dir = self.root / 'bin'
+    bin_dir.mkdir()
+    gcloud = bin_dir / 'gcloud'
+    gcloud.write_text('#!' + sys.executable + '\n' + self._FAKE_GCLOUD)
+    gcloud.chmod(0o755)
+    self.calls_path = self.root / 'calls.jsonl'
+    self.gcs_root = self.root / 'gcs'
+    self.environment = dict(os.environ)
+    self.environment.update({
+        'PATH': str(bin_dir) + os.pathsep + os.environ['PATH'],
+        'FAKE_GCLOUD_CALLS': str(self.calls_path),
+        'FAKE_GCS_ROOT': str(self.gcs_root),
+    })
+
+  def _calls(self):
+    if not self.calls_path.exists():
+      return []
+    return [json.loads(line) for line in self.calls_path.read_text().splitlines()]
+
+  def _run(self, script, **extra_environment):
+    environment = dict(self.environment)
+    environment.update(extra_environment)
+    return subprocess.run(
+        ['/bin/bash', '-c', script], env=environment,
+        capture_output=True, text=True, timeout=30,
+    )
+
+  def _helper_script(self, body):
+    return '\n'.join([
+        'set -o errexit', 'set -o nounset', 'set -o pipefail',
+        google_utils.LOG_MSG_FN, google_utils.STORAGE_CP_FN,
+        google_utils.STORAGE_RSYNC_FN,
+        'function sleep() { :; }',
+        body,
+    ])
+
+  def _requests(self):
+    single = self.provider._prepare_batch_request(
+        GoogleBatchProviderTest._job_descriptor(task_count=1))[0]
+    descriptor = GoogleBatchProviderTest._job_descriptor(task_count=201)
+    manifest = self.provider._build_task_manifest(descriptor)
+    array = self.provider._create_batch_request(descriptor, manifest)
+    return [single, array], manifest
+
+  def test_helper_commands_use_gcloud_storage_not_gsutil(self):
+    requests, _ = self._requests()
+    for request in requests:
+      runnables = request.job.task_groups[0].task_spec.runnables
+      helpers = [r for r in runnables if r.container.entrypoint == '/bin/bash']
+      self.assertTrue(helpers)
+      text = '\n'.join(r.container.commands[1] for r in helpers)
+      self.assertNotIn('gsutil', text)
+      self.assertIn('gcloud storage', text)
+      for runnable in helpers:
+        subprocess.run(
+            ['bash', '-n', '-c', runnable.container.commands[1]], check=True)
+
+  def test_copy_helpers_pass_gcloud_storage_flags(self):
+    wildcard_dir = self.root / 'data' / 'inputs' / 'wild'
+    result = self._run(self._helper_script(f"""
+      storage_cp "gs://bucket/in/*.txt" "{wildcard_dir}/" "" "billing-project"
+      storage_cp "{self.root}/log.txt" "gs://bucket/logs/task.log" "text/plain" ""
+      storage_rsync "gs://bucket/dir" "{self.root}/dir" "billing-project"
+    """))
+    self.assertEqual(result.returncode, 0, result.stderr)
+    self.assertTrue(wildcard_dir.is_dir())
+    self.assertEqual(self._calls(), [
+        ['storage', 'cp', '--no-user-output-enabled',
+         '--billing-project=billing-project',
+         'gs://bucket/in/*.txt', f'{wildcard_dir}/'],
+        ['storage', 'cp', '--no-user-output-enabled',
+         '--content-type=text/plain',
+         f'{self.root}/log.txt', 'gs://bucket/logs/task.log'],
+        ['storage', 'rsync', '--no-user-output-enabled', '--recursive',
+         '--billing-project=billing-project',
+         'gs://bucket/dir', f'{self.root}/dir'],
+    ])
+
+  def test_failed_copies_stop_the_action_after_retries(self):
+    for call in [
+        f'storage_cp "gs://bucket/missing.txt" "{self.root}/x" "" ""',
+        f'storage_rsync "gs://bucket/missing" "{self.root}/y" ""',
+    ]:
+      with self.subTest(call=call):
+        if self.calls_path.exists():
+          self.calls_path.unlink()
+        result = self._run(
+            self._helper_script(call + '\necho SHOULD_NOT_RUN'),
+            FAKE_GCLOUD_FAIL='1',
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn('SHOULD_NOT_RUN', result.stdout)
+        self.assertEqual(len(self._calls()), 4)
+        self.assertIn('ERROR: gcloud storage', result.stderr)
+
+  def test_manifest_bootstrap_reads_task_with_gcloud_storage(self):
+    requests, manifest = self._requests()
+    variables = dict(requests[1].job.task_groups[0].task_spec.environment.variables)
+    for uri, data in [(manifest.uri, manifest.data),
+                      (manifest.index_uri, manifest.index)]:
+      path = self.gcs_root / uri[len('gs://'):]
+      path.parent.mkdir(parents=True, exist_ok=True)
+      path.write_bytes(data)
+    data_dir = self.root / 'data'
+    command = google_batch._TASK_MANIFEST_BOOTSTRAP_CMD.replace(
+        '/mnt/data', str(data_dir))
+
+    result = self._run(command, BATCH_TASK_INDEX='200', **variables)
+    self.assertEqual(result.returncode, 0, result.stderr)
+    task_shell = (data_dir / '.dsub' / 'task-environment.sh').read_text()
+    self.assertIn('export SAMPLE_ID=sample-201\n', task_shell)
+    self.assertTrue(all(call[:2] == ['storage', 'cat'] for call in self._calls()))
+
+    shutil.rmtree(data_dir)
+    result = self._run(command, BATCH_TASK_INDEX='200', FAKE_GCLOUD_FAIL='1',
+                       **variables)
+    self.assertNotEqual(result.returncode, 0)
+    self.assertFalse((data_dir / '.dsub' / 'task-environment.json').exists())
+
+
 if __name__ == '__main__':
   unittest.main()

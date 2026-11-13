@@ -68,7 +68,7 @@ def make_runtime_dirs_command(script_dir: str, tmp_dir: str,
 # pylint: enable=g-complex-comprehension
 
 
-# Action steps that interact with GCS need gsutil and Python.
+# Action steps that interact with GCS need "gcloud storage" and Python.
 # Use the 'slim' variant of the cloud-sdk image as it is much smaller.
 # Google removes numbered tags after one year. Use a live default and
 # allow operators to select a compatible image in their own registry.
@@ -98,44 +98,48 @@ LOG_MSG_FN = textwrap.dedent("""\
   }
 """)
 
-# Define a bash function for "gsutil cp" to be used by the logging,
+# Define a bash function for "gcloud storage cp" to be used by the logging,
 # localization, and delocalization actions.
-GSUTIL_CP_FN = textwrap.dedent("""\
-  function gsutil_cp() {
+STORAGE_CP_FN = textwrap.dedent("""\
+  function storage_cp() {
     local src="${1}"
     local dst="${2}"
     local content_type="${3}"
     local user_project_name="${4}"
 
-    local headers=""
+    local args=(--no-user-output-enabled)
     if [[ -n "${content_type}" ]]; then
-      headers="-h Content-Type:${content_type}"
+      args+=("--content-type=${content_type}")
+    fi
+    if [[ -n "${user_project_name}" ]]; then
+      args+=("--billing-project=${user_project_name}")
     fi
 
-    local user_project_flag=""
-    if [[ -n "${user_project_name}" ]]; then
-      user_project_flag="-u ${user_project_name}"
+    # "gcloud storage cp" will not create a missing local destination
+    # directory (used for wildcard inputs).
+    if [[ "${dst}" != gs://* ]] && [[ "${dst}" == */ ]]; then
+      mkdir -p "${dst}"
     fi
 
     local attempt
     for ((attempt = 0; attempt < 4; attempt++)); do
-      log_info "gsutil ${headers} ${user_project_flag} -mq cp \"${src}\" \"${dst}\""
-      if gsutil ${headers} ${user_project_flag} -mq cp "${src}" "${dst}"; then
+      log_info "gcloud storage cp ${args[*]} \"${src}\" \"${dst}\""
+      if gcloud storage cp "${args[@]}" "${src}" "${dst}"; then
         return
       fi
       if (( attempt < 3 )); then
-        log_warning "Sleeping 10s before the next attempt of failed gsutil command"
-        log_warning "gsutil ${headers} ${user_project_flag} -mq cp \"${src}\" \"${dst}\""
+        log_warning "Sleeping 10s before the next attempt of failed gcloud storage command"
+        log_warning "gcloud storage cp ${args[*]} \"${src}\" \"${dst}\""
         sleep 10s
       fi
     done
 
-    log_error "gsutil ${headers} ${user_project_flag} -mq cp \"${src}\" \"${dst}\""
+    log_error "gcloud storage cp ${args[*]} \"${src}\" \"${dst}\""
     exit 1
   }
 """)
 
-LOG_CP_FN = GSUTIL_CP_FN + textwrap.dedent("""\
+LOG_CP_FN = STORAGE_CP_FN + textwrap.dedent("""\
 
   function log_cp() {
     local src="${1}"
@@ -148,43 +152,43 @@ LOG_CP_FN = GSUTIL_CP_FN + textwrap.dedent("""\
       return
     fi
 
-    # Copy the log files to a local temporary location so that our "gsutil cp" is never
+    # Copy the log files to a local temporary location so that our copy is never
     # executed on a file that is changing.
 
     local tmp_path="${tmp}/$(basename ${src})"
     cp "${src}" "${tmp_path}"
 
-    gsutil_cp "${tmp_path}" "${dst}" "text/plain" "${user_project_name}"
+    storage_cp "${tmp_path}" "${dst}" "text/plain" "${user_project_name}"
   }
 """)
 
-# Define a bash function for "gsutil rsync" to be used by the logging,
-# localization, and delocalization actions.
-GSUTIL_RSYNC_FN = textwrap.dedent("""\
-  function gsutil_rsync() {
+# Define a bash function for "gcloud storage rsync" to be used by the
+# localization and delocalization actions.
+STORAGE_RSYNC_FN = textwrap.dedent("""\
+  function storage_rsync() {
     local src="${1}"
     local dst="${2}"
     local user_project_name="${3}"
 
-    local user_project_flag=""
+    local args=(--no-user-output-enabled --recursive)
     if [[ -n "${user_project_name}" ]]; then
-      user_project_flag="-u ${user_project_name}"
+      args+=("--billing-project=${user_project_name}")
     fi
 
     local attempt
     for ((attempt = 0; attempt < 4; attempt++)); do
-      log_info "gsutil ${user_project_flag} -mq rsync -r \"${src}\" \"${dst}\""
-      if gsutil ${user_project_flag} -mq rsync -r "${src}" "${dst}"; then
+      log_info "gcloud storage rsync ${args[*]} \"${src}\" \"${dst}\""
+      if gcloud storage rsync "${args[@]}" "${src}" "${dst}"; then
         return
       fi
       if (( attempt < 3 )); then
-        log_warning "Sleeping 10s before the next attempt of failed gsutil command"
-        log_warning "gsutil ${user_project_flag} -mq rsync -r \"${src}\" \"${dst}\""
+        log_warning "Sleeping 10s before the next attempt of failed gcloud storage command"
+        log_warning "gcloud storage rsync ${args[*]} \"${src}\" \"${dst}\""
         sleep 10s
       fi
     done
 
-    log_error "gsutil ${user_project_flag} -mq rsync -r \"${src}\" \"${dst}\""
+    log_error "gcloud storage rsync ${args[*]} \"${src}\" \"${dst}\""
     exit 1
   }
 """)
@@ -202,9 +206,9 @@ LOCALIZATION_LOOP = textwrap.dedent("""\
 
     log_info "Localizing ${!INPUT_VAR}"
     if [[ "${!INPUT_RECURSIVE}" -eq "1" ]]; then
-      gsutil_rsync "${!INPUT_SRC}" "${!INPUT_DST}" "${USER_PROJECT}"
+      storage_rsync "${!INPUT_SRC}" "${!INPUT_DST}" "${USER_PROJECT}"
     else
-      gsutil_cp "${!INPUT_SRC}" "${!INPUT_DST}" "" "${USER_PROJECT}"
+      storage_cp "${!INPUT_SRC}" "${!INPUT_DST}" "" "${USER_PROJECT}"
     fi
   done
 """)
@@ -222,9 +226,9 @@ DELOCALIZATION_LOOP = textwrap.dedent("""\
 
     log_info "Delocalizing ${!OUTPUT_VAR}"
     if [[ "${!OUTPUT_RECURSIVE}" -eq "1" ]]; then
-      gsutil_rsync "${!OUTPUT_SRC}" "${!OUTPUT_DST}" "${USER_PROJECT}"
+      storage_rsync "${!OUTPUT_SRC}" "${!OUTPUT_DST}" "${USER_PROJECT}"
     else
-      gsutil_cp "${!OUTPUT_SRC}" "${!OUTPUT_DST}" "" "${USER_PROJECT}"
+      storage_cp "${!OUTPUT_SRC}" "${!OUTPUT_DST}" "" "${USER_PROJECT}"
     fi
   done
 """)

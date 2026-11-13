@@ -20,7 +20,7 @@ from . import job_model
 from .._dsub_version import DSUB_VERSION
 
 _LOCALIZE_COMMAND_MAP = {
-    job_model.P_GCS: 'gsutil -m rsync -r',
+    job_model.P_GCS: 'gcloud storage rsync --no-user-output-enabled -r',
     job_model.P_LOCAL: 'rsync -r',
 }
 

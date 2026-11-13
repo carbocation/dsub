@@ -100,19 +100,26 @@ _TASK_MANIFEST_BOOTSTRAP_CMD = textwrap.dedent(r'''\
   readonly index_start="$((BATCH_TASK_INDEX * index_size))"
   readonly index_end="$((index_start + index_size - 1))"
 
-  user_project_args=()
+  storage_args=(--no-user-output-enabled)
   if [[ -n "${_DSUB_TASK_MANIFEST_USER_PROJECT}" ]]; then
-    user_project_args=(-u "${_DSUB_TASK_MANIFEST_USER_PROJECT}")
+    storage_args+=("--billing-project=${_DSUB_TASK_MANIFEST_USER_PROJECT}")
   fi
 
   mkdir -p "${task_root}"
-  read -r task_start task_end < <(
-    gsutil "${user_project_args[@]}" -q cat \
-      -r "${index_start}-${index_end}" \
+  # A plain assignment (not "read < <(...)") so that a failed read stops the
+  # task instead of leaving the byte range empty.
+  index_record="$(
+    gcloud storage cat "${storage_args[@]}" \
+      --range="${index_start}-${index_end}" \
       "${_DSUB_TASK_MANIFEST_INDEX_URI}"
-  )
-  gsutil "${user_project_args[@]}" -q cat \
-    -r "${task_start}-${task_end}" \
+  )"
+  read -r task_start task_end <<< "${index_record}"
+  if ! [[ "${task_start:-}" =~ ^[0-9]+$ && "${task_end:-}" =~ ^[0-9]+$ ]]; then
+    1>&2 echo "Invalid task manifest index record: ${index_record}"
+    exit 1
+  fi
+  gcloud storage cat "${storage_args[@]}" \
+    --range="${task_start}-${task_end}" \
     "${_DSUB_TASK_MANIFEST_URI}" > "${task_json}"
 
   python3 - "${task_json}" "${task_shell}" <<'PY'
@@ -218,11 +225,11 @@ _LOG_CP = textwrap.dedent("""
       "${{LOGGING_DIR}}/stderr.txt" \
       "{user_action}"
 
-  gsutil_cp "${{LOGGING_DIR}}/stdout.txt" "${{STDOUT_PATH}}" "text/plain" "${{USER_PROJECT}}" &
+  storage_cp "${{LOGGING_DIR}}/stdout.txt" "${{STDOUT_PATH}}" "text/plain" "${{USER_PROJECT}}" &
   STDOUT_PID=$!
-  gsutil_cp "${{LOGGING_DIR}}/stderr.txt" "${{STDERR_PATH}}" "text/plain"  "${{USER_PROJECT}}" &
+  storage_cp "${{LOGGING_DIR}}/stderr.txt" "${{STDERR_PATH}}" "text/plain"  "${{USER_PROJECT}}" &
   STDERR_PID=$!
-  gsutil_cp "${{LOGGING_DIR}}/log.txt" "${{LOGGING_PATH}}" "text/plain" "${{USER_PROJECT}}" &
+  storage_cp "${{LOGGING_DIR}}/log.txt" "${{LOGGING_PATH}}" "text/plain" "${{USER_PROJECT}}" &
   LOG_PID=$!
 
   wait "${{STDOUT_PID}}"
@@ -241,7 +248,7 @@ _FINAL_LOGGING_CMD = textwrap.dedent("""\
   touch "${{LOGGING_DIR}}/.stop_logging"
 
   {log_msg_fn}
-  {gsutil_cp_fn}
+  {storage_cp_fn}
 
   {log_cp}
 """)
@@ -255,7 +262,7 @@ _CONTINUOUS_LOGGING_CMD = textwrap.dedent("""\
   readonly LOGGING_DIR="{logging_dir}"
 
   {log_msg_fn}
-  {gsutil_cp_fn}
+  {storage_cp_fn}
 
   # Make sure the logging work directory exists
   mkdir -p "${{LOGGING_DIR}}"
@@ -964,7 +971,7 @@ class GoogleBatchJobProvider(google_utils.GoogleJobProviderBase):
 
     continuous_logging_cmd = _CONTINUOUS_LOGGING_CMD.format(
         log_msg_fn=google_utils.LOG_MSG_FN,
-        gsutil_cp_fn=google_utils.GSUTIL_CP_FN,
+        storage_cp_fn=google_utils.STORAGE_CP_FN,
         log_filter_var=_LOG_FILTER_VAR,
         log_filter_script_path=_LOG_FILTER_SCRIPT_PATH,
         python_decode_script=google_utils.PYTHON_DECODE_SCRIPT,
@@ -978,7 +985,7 @@ class GoogleBatchJobProvider(google_utils.GoogleJobProviderBase):
 
     logging_cmd = _FINAL_LOGGING_CMD.format(
         log_msg_fn=google_utils.LOG_MSG_FN,
-        gsutil_cp_fn=google_utils.GSUTIL_CP_FN,
+        storage_cp_fn=google_utils.STORAGE_CP_FN,
         log_filter_var=_LOG_FILTER_VAR,
         log_filter_script_path=_LOG_FILTER_SCRIPT_PATH,
         python_decode_script=google_utils.PYTHON_DECODE_SCRIPT,
@@ -1103,8 +1110,8 @@ class GoogleBatchJobProvider(google_utils.GoogleJobProviderBase):
                 )
                 + google_utils.LOCALIZATION_CMD.format(
                     log_msg_fn=google_utils.LOG_MSG_FN,
-                    recursive_cp_fn=google_utils.GSUTIL_RSYNC_FN,
-                    cp_fn=google_utils.GSUTIL_CP_FN,
+                    recursive_cp_fn=google_utils.STORAGE_RSYNC_FN,
+                    cp_fn=google_utils.STORAGE_CP_FN,
                     cp_loop=google_utils.LOCALIZATION_LOOP,
                 ),
             ],
@@ -1154,8 +1161,8 @@ class GoogleBatchJobProvider(google_utils.GoogleJobProviderBase):
                 )
                 + google_utils.LOCALIZATION_CMD.format(
                     log_msg_fn=google_utils.LOG_MSG_FN,
-                    recursive_cp_fn=google_utils.GSUTIL_RSYNC_FN,
-                    cp_fn=google_utils.GSUTIL_CP_FN,
+                    recursive_cp_fn=google_utils.STORAGE_RSYNC_FN,
+                    cp_fn=google_utils.STORAGE_CP_FN,
                     cp_loop=google_utils.DELOCALIZATION_LOOP,
                 ),
             ],
