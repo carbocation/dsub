@@ -21,7 +21,7 @@ Then verify the installed command:
 
 It should report:
 
-    dsub version: 0.5.1+batchfix.4
+    dsub version: 0.5.1+batchfix.5
 
 To install changes from a local checkout into the Python environment that
 provides your `dsub` command, run:
@@ -37,7 +37,9 @@ compatible image, set `DSUB_CLOUD_SDK_IMAGE` before submitting jobs:
 
     export DSUB_CLOUD_SDK_IMAGE=YOUR_REGISTRY/cloud-sdk:YOUR_TAG
 
-The override must provide Bash, `python3`, and `gcloud storage`. It applies to
+The override must provide Bash, `gcloud storage`, and either `python3` on
+`PATH` or the SDK's bundled Python at
+`/usr/lib/google-cloud-sdk/platform/bundledpythonunix/bin/python3`. It applies to
 setup, task-manifest loading, transfers, and logging; `--image` continues
 to select the container for your analysis. An unset or empty override
 uses the default. Mirror a pinned image into a registry you control
@@ -54,6 +56,12 @@ same commands for GCS transfers and `rsync` for local file copies, preserving
 filename wildcards without copying subdirectories for nonrecursive inputs
 and outputs.
 
+The Python fallback from upstream
+[v0.5.7](https://github.com/DataBiosphere/dsub/releases/tag/v0.5.7) also covers
+our task-manifest loader. When a helper image has no `python3` on `PATH`,
+the helper uses the SDK's bundled interpreter and sets `CLOUDSDK_PYTHON`
+for `gcloud`.
+
 When a new Job or its Tasks are not yet visible in Batch listings, the
 provider checks exact Job IDs directly and uses the parent Job status for
 missing Task records. This keeps `--wait` active during startup; actual
@@ -63,6 +71,15 @@ Job and task listings use an explicit page size (500 by default). This
 keeps continuation requests consistent with Batch's page tokens and avoids
 the `request page size (0) != token page size (500)` error when monitoring
 large task arrays. An explicitly requested nonzero page size is preserved.
+
+Batch reads retry transient 504, 500, 503, and 429 errors with a 120-second
+RPC timeout and a 600-second retry budget. Job and Task listings also retry
+the complete paginated read up to five times, discarding partial results
+before restarting. Exact Job lookups use the same read policy. Retry warnings
+make these waits visible; persistent failures can take tens of minutes to
+surface. Submissions retry up to five times using the same Job ID. If a retry
+reports that the Job already exists, the provider fetches that Job; a duplicate
+reported on the first attempt remains an error.
 
 The upstream README is preserved verbatim below.
 

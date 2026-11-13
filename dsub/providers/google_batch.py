@@ -20,6 +20,7 @@ Google Batch v1 APIs.
 import ast
 import io
 import json
+import logging
 import operator
 import os
 import re
@@ -28,7 +29,9 @@ import textwrap
 from typing import Dict, List, NamedTuple, Set
 
 from google.api_core import exceptions as google_exceptions
+from google.api_core import retry
 import googleapiclient.http
+import tenacity
 
 from ..lib import dsub_util
 from ..lib import job_model
@@ -47,6 +50,47 @@ except ImportError:
   # TODO: Remove conditional import when batch library is available
   from . import batch_dummy as batch_v1
 # pylint: enable=g-import-not-at-top
+
+_LOGGER = logging.getLogger(__name__)
+_BATCH_TRANSIENT_ERRORS = (
+    google_exceptions.DeadlineExceeded,
+    google_exceptions.InternalServerError,
+    google_exceptions.ServiceUnavailable,
+    google_exceptions.TooManyRequests,
+)
+_BATCH_LIST_RETRY_ERRORS = _BATCH_TRANSIENT_ERRORS + (
+    google_exceptions.RetryError,
+)
+_BATCH_LIST_ATTEMPTS = 5
+_CREATE_JOB_ATTEMPTS = 5
+
+
+def _log_batch_rpc_retry(error):
+  _LOGGER.warning('Retrying a transient Batch API read failure: %s', error)
+
+
+def _log_batch_retry(state):
+  _LOGGER.warning(
+      'Batch %s failed: %s. Retrying in %.1fs (attempt %d of %d).',
+      state.fn.__name__.lstrip('_').replace('_', ' '),
+      state.outcome.exception(), state.next_action.sleep,
+      state.attempt_number + 1, state.retry_object.stop.max_attempt_number,
+  )
+
+
+# Adapted from upstream v0.5.7. Use the same policy for Job listings, Task
+# listings, and exact Job reads so task-array monitoring survives transient
+# 504/500/503/429 failures throughout its read path.
+_BATCH_READ_RETRY = retry.Retry(
+    predicate=retry.if_exception_type(*_BATCH_TRANSIENT_ERRORS),
+    initial=1.0,
+    maximum=60.0,
+    multiplier=2.0,
+    timeout=600.0,
+    on_error=_log_batch_rpc_retry,
+)
+_BATCH_READ_TIMEOUT = 120.0
+
 _PROVIDER_NAME = 'google-batch'
 # Index of the prepare action in the runnable list
 _PREPARE_INDEX = 1
@@ -88,7 +132,7 @@ _LOGGING_DIR = f'{_DATA_MOUNT_POINT}/.logging'
 _LOG_FILTER_VAR = '_LOG_FILTER_REPR'
 _LOG_FILTER_SCRIPT_PATH = f'{_DATA_MOUNT_POINT}/.log_filter_script.py'
 
-_TASK_MANIFEST_BOOTSTRAP_CMD = textwrap.dedent(r'''\
+_TASK_MANIFEST_BOOTSTRAP_CMD = google_utils.PYTHON_FN + textwrap.dedent(r'''\
   set -o errexit
   set -o nounset
   set -o pipefail
@@ -249,6 +293,7 @@ _FINAL_LOGGING_CMD = textwrap.dedent("""\
 
   {log_msg_fn}
   {storage_cp_fn}
+  {python_fn}
 
   {log_cp}
 """)
@@ -263,6 +308,7 @@ _CONTINUOUS_LOGGING_CMD = textwrap.dedent("""\
 
   {log_msg_fn}
   {storage_cp_fn}
+  {python_fn}
 
   # Make sure the logging work directory exists
   mkdir -p "${{LOGGING_DIR}}"
@@ -972,6 +1018,7 @@ class GoogleBatchJobProvider(google_utils.GoogleJobProviderBase):
     continuous_logging_cmd = _CONTINUOUS_LOGGING_CMD.format(
         log_msg_fn=google_utils.LOG_MSG_FN,
         storage_cp_fn=google_utils.STORAGE_CP_FN,
+        python_fn=google_utils.PYTHON_FN,
         log_filter_var=_LOG_FILTER_VAR,
         log_filter_script_path=_LOG_FILTER_SCRIPT_PATH,
         python_decode_script=google_utils.PYTHON_DECODE_SCRIPT,
@@ -986,6 +1033,7 @@ class GoogleBatchJobProvider(google_utils.GoogleJobProviderBase):
     logging_cmd = _FINAL_LOGGING_CMD.format(
         log_msg_fn=google_utils.LOG_MSG_FN,
         storage_cp_fn=google_utils.STORAGE_CP_FN,
+        python_fn=google_utils.PYTHON_FN,
         log_filter_var=_LOG_FILTER_VAR,
         log_filter_script_path=_LOG_FILTER_SCRIPT_PATH,
         python_decode_script=google_utils.PYTHON_DECODE_SCRIPT,
@@ -1001,6 +1049,7 @@ class GoogleBatchJobProvider(google_utils.GoogleJobProviderBase):
     script_path = os.path.join(_SCRIPT_DIR, script.name)
     prepare_command = google_utils.PREPARE_CMD.format(
         log_msg_fn=google_utils.LOG_MSG_FN,
+        python_fn=google_utils.PYTHON_FN,
         mk_runtime_dirs=google_utils.make_runtime_dirs_command(
             _SCRIPT_DIR, _TMP_DIR, _WORKING_DIR
         ),
@@ -1112,6 +1161,7 @@ class GoogleBatchJobProvider(google_utils.GoogleJobProviderBase):
                     log_msg_fn=google_utils.LOG_MSG_FN,
                     recursive_cp_fn=google_utils.STORAGE_RSYNC_FN,
                     cp_fn=google_utils.STORAGE_CP_FN,
+                    python_fn=google_utils.PYTHON_FN,
                     cp_loop=google_utils.LOCALIZATION_LOOP,
                 ),
             ],
@@ -1163,6 +1213,7 @@ class GoogleBatchJobProvider(google_utils.GoogleJobProviderBase):
                     log_msg_fn=google_utils.LOG_MSG_FN,
                     recursive_cp_fn=google_utils.STORAGE_RSYNC_FN,
                     cp_fn=google_utils.STORAGE_CP_FN,
+                    python_fn=google_utils.PYTHON_FN,
                     cp_loop=google_utils.DELOCALIZATION_LOOP,
                 ),
             ],
@@ -1298,9 +1349,39 @@ class GoogleBatchJobProvider(google_utils.GoogleJobProviderBase):
     # pylint: enable=line-too-long
     return job_request
 
+  def _create_job_with_retry(self, client, request):
+    """Retry one fixed Job ID, recovering an ambiguous successful create."""
+    attempts = 0
+
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(_CREATE_JOB_ATTEMPTS),
+        retry=tenacity.retry_if_exception_type(_BATCH_TRANSIENT_ERRORS),
+        wait=tenacity.wait_exponential(multiplier=2, max=60),
+        before_sleep=_log_batch_retry,
+        reraise=True,
+    )
+    def create():
+      nonlocal attempts
+      attempts += 1
+      try:
+        # Count every create RPC here, including ambiguous timeout outcomes.
+        return client.create_job(request=request, retry=None)
+      except google_exceptions.AlreadyExists:
+        if attempts == 1:
+          raise
+        return client.get_job(
+            request=batch_v1.GetJobRequest(
+                name=f'{request.parent}/jobs/{request.job_id}'
+            ),
+            retry=_BATCH_READ_RETRY,
+            timeout=_BATCH_READ_TIMEOUT,
+        )
+
+    return create()
+
   def _submit_batch_job(self, request):
     client = batch_v1.BatchServiceClient()
-    job_response = client.create_job(request=request)
+    job_response = self._create_job_with_retry(client, request)
     print(f'Provider internal-id (operation): {job_response.name}')
 
   def _prepare_batch_request(self, job_descriptor):
@@ -1521,6 +1602,32 @@ class GoogleBatchJobProvider(google_utils.GoogleJobProviderBase):
       return False
     return True
 
+  @tenacity.retry(
+      stop=tenacity.stop_after_attempt(_BATCH_LIST_ATTEMPTS),
+      retry=tenacity.retry_if_exception_type(_BATCH_LIST_RETRY_ERRORS),
+      wait=tenacity.wait_exponential(multiplier=2, max=60),
+      before_sleep=_log_batch_retry,
+      reraise=True,
+  )
+  def _list_all_jobs(self, client, request):
+    """Retry the complete Job listing, including lazily fetched pages."""
+    return list(client.list_jobs(
+        request=request, retry=_BATCH_READ_RETRY, timeout=_BATCH_READ_TIMEOUT
+    ))
+
+  @tenacity.retry(
+      stop=tenacity.stop_after_attempt(_BATCH_LIST_ATTEMPTS),
+      retry=tenacity.retry_if_exception_type(_BATCH_LIST_RETRY_ERRORS),
+      wait=tenacity.wait_exponential(multiplier=2, max=60),
+      before_sleep=_log_batch_retry,
+      reraise=True,
+  )
+  def _list_all_tasks(self, client, request):
+    """Retry the complete Task listing without exposing partial results."""
+    return list(client.list_tasks(
+        request=request, retry=_BATCH_READ_RETRY, timeout=_BATCH_READ_TIMEOUT
+    ))
+
   def lookup_job_tasks(
       self,
       statuses: Set[str],
@@ -1561,7 +1668,7 @@ class GoogleBatchJobProvider(google_utils.GoogleJobProviderBase):
         page_size=effective_page_size,
     )
 
-    jobs = list(client.list_jobs(request=request))
+    jobs = self._list_all_jobs(client, request)
     # An exact Job lookup can succeed before the list index exposes a newly
     # submitted Job. Retain label-based listing for legacy IDs and retries.
     found_job_ids = {job.labels.get('job-id') for job in jobs}
@@ -1569,9 +1676,13 @@ class GoogleBatchJobProvider(google_utils.GoogleJobProviderBase):
       if job_id == '*':
         continue
       try:
-        job = client.get_job(request=batch_v1.GetJobRequest(
-            name=f'{request.parent}/jobs/{job_id}'
-        ))
+        job = client.get_job(
+            request=batch_v1.GetJobRequest(
+                name=f'{request.parent}/jobs/{job_id}'
+            ),
+            retry=_BATCH_READ_RETRY,
+            timeout=_BATCH_READ_TIMEOUT,
+        )
       except google_exceptions.NotFound:
         continue
       jobs.append(job)
@@ -1586,7 +1697,7 @@ class GoogleBatchJobProvider(google_utils.GoogleJobProviderBase):
       try:
         batch_tasks = {
             GoogleBatchOperation._get_task_index(task): task
-            for task in client.list_tasks(request=task_request)
+            for task in self._list_all_tasks(client, task_request)
         }
       except google_exceptions.NotFound:
         # The parent Job is visible, but its TaskGroup may still be pending.

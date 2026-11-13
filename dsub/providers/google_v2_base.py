@@ -88,6 +88,7 @@ _FINAL_LOGGING_CMD = textwrap.dedent("""\
 
   {log_msg_fn}
   {log_cp_fn}
+  {python_fn}
   {log_cp_cmd}
 """)
 
@@ -99,6 +100,7 @@ _CONTINUOUS_LOGGING_CMD = textwrap.dedent("""\
 
   {log_msg_fn}
   {log_cp_fn}
+  {python_fn}
 
   while [[ ! -d /google/logs/action/{final_logging_action} ]]; do
     {log_cp_cmd}
@@ -442,6 +444,7 @@ class GoogleV2JobProviderBase(google_utils.GoogleJobProviderBase):
     final_logging_cmd = _FINAL_LOGGING_CMD.format(
         log_msg_fn=google_utils.LOG_MSG_FN,
         log_cp_fn=google_utils.LOG_CP_FN,
+        python_fn=google_utils.PYTHON_FN,
         log_cp_cmd=_LOG_CP_CMD.format(
             user_action=user_action, logging_action='logging_action'
         ),
@@ -449,6 +452,7 @@ class GoogleV2JobProviderBase(google_utils.GoogleJobProviderBase):
     continuous_logging_cmd = _CONTINUOUS_LOGGING_CMD.format(
         log_msg_fn=google_utils.LOG_MSG_FN,
         log_cp_fn=google_utils.LOG_CP_FN,
+        python_fn=google_utils.PYTHON_FN,
         log_cp_cmd=_LOG_CP_CMD.format(
             user_action=user_action, logging_action='continuous_logging_action'
         ),
@@ -463,6 +467,7 @@ class GoogleV2JobProviderBase(google_utils.GoogleJobProviderBase):
     script_path = os.path.join(_SCRIPT_DIR, script.name)
     prepare_command = google_utils.PREPARE_CMD.format(
         log_msg_fn=google_utils.LOG_MSG_FN,
+        python_fn=google_utils.PYTHON_FN,
         mk_runtime_dirs=google_utils.make_runtime_dirs_command(
             _SCRIPT_DIR, _TMP_DIR, _WORKING_DIR),
         script_var=google_utils.SCRIPT_VARNAME,
@@ -531,6 +536,7 @@ class GoogleV2JobProviderBase(google_utils.GoogleJobProviderBase):
                     log_msg_fn=google_utils.LOG_MSG_FN,
                     recursive_cp_fn=google_utils.STORAGE_RSYNC_FN,
                     cp_fn=google_utils.STORAGE_CP_FN,
+                    python_fn=google_utils.PYTHON_FN,
                     cp_loop=google_utils.LOCALIZATION_LOOP,
                 ),
             ],
@@ -568,6 +574,7 @@ class GoogleV2JobProviderBase(google_utils.GoogleJobProviderBase):
                     log_msg_fn=google_utils.LOG_MSG_FN,
                     recursive_cp_fn=google_utils.STORAGE_RSYNC_FN,
                     cp_fn=google_utils.STORAGE_CP_FN,
+                    python_fn=google_utils.PYTHON_FN,
                     cp_loop=google_utils.DELOCALIZATION_LOOP,
                 ),
             ],

@@ -237,6 +237,7 @@ LOCALIZATION_CMD = textwrap.dedent("""\
   {log_msg_fn}
   {recursive_cp_fn}
   {cp_fn}
+  {python_fn}
 
   {cp_loop}
 """)
@@ -254,6 +255,20 @@ LOCALIZATION_CMD = textwrap.dedent("""\
 # user-readable in the LifeSciences "operation" or Batch "Job" object.
 SCRIPT_VARNAME = '_SCRIPT_REPR'
 META_YAML_VARNAME = '_META_YAML_REPR'
+
+# Recent cloud-sdk slim images only provide the SDK's bundled Python. Set its
+# path directly: asking gcloud for it also fails when system Python is absent.
+CLOUD_SDK_BUNDLED_PYTHON = (
+    '/usr/lib/google-cloud-sdk/platform/bundledpythonunix/bin/python3')
+
+PYTHON_FN = textwrap.dedent("""\
+  if ! command -v python3 >/dev/null 2>&1; then
+    export CLOUDSDK_PYTHON="{bundled_python}"
+    function python3() {{
+      "${{CLOUDSDK_PYTHON}}" "$@"
+    }}
+  fi
+""").format(bundled_python=CLOUD_SDK_BUNDLED_PYTHON)
 
 PYTHON_DECODE_SCRIPT = textwrap.dedent("""\
   import ast
@@ -279,6 +294,7 @@ PREPARE_CMD = textwrap.dedent("""\
   set -o pipefail
 
   {log_msg_fn}
+  {python_fn}
   {mk_runtime_dirs}
 
   echo "${{{script_var}}}" \

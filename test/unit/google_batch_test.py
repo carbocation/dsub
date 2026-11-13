@@ -482,7 +482,7 @@ class GoogleBatchProviderTest(unittest.TestCase):
               next_page_token=str(end) if end < len(records) else '',
           )
 
-        def list_tasks(request):
+        def list_tasks(request, **unused_kwargs):
           return pagers.ListTasksPager(
               method=fetch_page, request=request, response=fetch_page(request)
           )
@@ -535,7 +535,7 @@ class GoogleBatchProviderTest(unittest.TestCase):
               next_page_token=str(end) if end < len(records) else '',
           )
 
-        def list_jobs(request):
+        def list_jobs(request, **unused_kwargs):
           return pagers.ListJobsPager(
               method=fetch_page, request=request, response=fetch_page(request)
           )
